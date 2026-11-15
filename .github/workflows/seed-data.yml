@@ -1,0 +1,65 @@
+name: Seed dataset from preserved website revision
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact website commit to preserve
+        required: true
+        type: string
+permissions:
+  contents: write
+  pages: write
+concurrency:
+  group: seed-data
+  cancel-in-progress: false
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: target
+          ref: main
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: konstantinosStouras/konstantinosStouras.github.io
+          ref: ${{ inputs.source_ref }}
+          path: source
+          filter: blob:none
+          sparse-checkout: lit/data-refs
+      - name: Copy and hash source data
+        env:
+          SOURCE_SHA: ${{ inputs.source_ref }}
+        run: |
+          python3 <<'PY'
+          import pathlib, shutil, json, hashlib, os
+          source=pathlib.Path('source/lit/data-refs')
+          dest=pathlib.Path('target/data')
+          if dest.exists(): shutil.rmtree(dest)
+          dest.mkdir(parents=True)
+          files=None
+          if files is None:
+              shutil.copytree(source,dest,dirs_exist_ok=True)
+          else:
+              for name in files: shutil.copy2(source/name,dest/name)
+          entries=[{'path':str(p.relative_to(dest)).replace('\\','/'),'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(dest.rglob('*')) if p.is_file()]
+          assert entries, 'Empty dataset'
+          assert sum(f['size'] for f in entries)<950*1024*1024, 'Dataset exceeds Pages safety budget'
+          snapshot={'version':1,'dataset':'refs','sourceRepository':'konstantinosStouras/konstantinosStouras.github.io','sourceCommit':os.environ['SOURCE_SHA'],'files':entries}
+          pathlib.Path('target/snapshot.json').write_text(json.dumps(snapshot,separators=(',',':'))+'\n')
+          PY
+      - name: Commit preserved snapshot
+        working-directory: target
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data snapshot.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Seed dataset from preserved website snapshot"
+            git push origin HEAD:main
+          fi
+      - name: Request Pages build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api --method POST repos/konstantinosStouras/lit-data-refs/pages/builds
